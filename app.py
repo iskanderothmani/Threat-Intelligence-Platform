@@ -1,45 +1,45 @@
-"""Local, offline threat-intelligence triage using transparent demo rules."""
+"""Offline indicator triage with validation and explainable scoring."""
 from __future__ import annotations
 import ipaddress, re
 from urllib.parse import urlparse
 
-SHA256 = re.compile(r"^[a-fA-F0-9]{64}$")
-DOMAIN = re.compile(r"^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[A-Za-z]{2,63}$")
+_DOMAIN = re.compile(r"(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[A-Za-z]{2,63}\Z")
+_SHA256 = re.compile(r"[a-fA-F0-9]{64}\Z")
 
 def classify_indicator(value: str) -> dict:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Indicator must be a non-empty string")
     raw = value.strip()
-    if not raw:
-        raise ValueError("Indicator cannot be empty")
-    kind, normalized, score, reasons = "unknown", raw, 0, []
+    score, reasons = 0, []
     try:
-        normalized = str(ipaddress.ip_address(raw))
-        kind = "ip"
-        if ipaddress.ip_address(normalized).is_private:
-            reasons.append("private address: validate context before escalation")
-        else:
-            score += 20
+        ip = ipaddress.ip_address(raw)
+        return {"indicator": str(ip), "type": "ip", "score": 0, "severity": "informational", "reasons": []}
     except ValueError:
-        if SHA256.fullmatch(raw):
-            kind, normalized, score = "sha256", raw.lower(), 10
-        elif raw.lower().startswith(("http://", "https://")):
-            parsed = urlparse(raw)
-            if not parsed.hostname:
-                raise ValueError("URL must include a hostname")
-            kind, normalized = "url", raw
-            if parsed.scheme == "http":
-                score += 15; reasons.append("unencrypted HTTP scheme")
-            if "@" in parsed.netloc:
-                score += 20; reasons.append("URL user-info may be deceptive")
-        elif DOMAIN.fullmatch(raw):
-            kind, normalized = "domain", raw.lower()
-            if normalized.startswith("xn--"):
-                score += 10; reasons.append("internationalized domain: inspect for lookalikes")
-        else:
-            raise ValueError("Unsupported indicator; use IP, domain, URL, or SHA-256")
-    score = min(score, 100)
-    severity = "high" if score >= 60 else "medium" if score >= 25 else "low"
+        pass
+    if _SHA256.fullmatch(raw):
+        return {"indicator": raw.lower(), "type": "sha256", "score": 0, "severity": "informational", "reasons": []}
+    if raw.lower().startswith(("http://", "https://")):
+        parsed = urlparse(raw)
+        if not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("URL must have a hostname and must not embed credentials")
+        if parsed.scheme == "http":
+            score += 20
+            reasons.append("URL uses unencrypted HTTP")
+        host = parsed.hostname.lower()
+        if host.startswith("xn--") or ".xn--" in host:
+            score += 10
+            reasons.append("Internationalized hostname may require lookalike review")
+        kind, normalized = "url", raw
+    elif _DOMAIN.fullmatch(raw):
+        kind, normalized = "domain", raw.lower()
+        if normalized.startswith("xn--") or ".xn--" in normalized:
+            score += 10
+            reasons.append("Internationalized domain may require lookalike review")
+    else:
+        raise ValueError("Unsupported indicator: provide an IP, domain, HTTP(S) URL, or SHA-256")
+    severity = "high" if score >= 60 else "medium" if score >= 25 else "low" if score else "informational"
     return {"indicator": normalized, "type": kind, "score": score, "severity": severity, "reasons": reasons}
 
 if __name__ == "__main__":
-    for item in ["203.0.113.10", "example.org", "https://example.org/login"]:
-        print(classify_indicator(item))
+    for sample in ("203.0.113.10", "example.org", "http://example.org/login"):
+        print(classify_indicator(sample))
